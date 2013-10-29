@@ -2,18 +2,30 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	_ "github.com/lib/pq"
 	"time"
 )
+
+const TTL_TO_UPDATE = 10
 
 type DataRow struct {
 	DataId     int
 	GraphId    int
 	Ts         time.Time
 	Value      float64
-	Params     map[string]string
+	Params     map[string]interface{}
 	C1, C2, C3 float64
+}
+
+func (dr *DataRow) ParamsAsJSON() string {
+	if len(dr.Params) == 0 {
+		return `{}`
+	}
+
+	result, _ := json.Marshal(dr.Params)
+	return string(result)
 }
 
 type Graph struct {
@@ -32,14 +44,33 @@ func (g *Graph) AddRow(row *DataRow) {
 	fmt.Printf(`%+v`, row)
 }
 
-func (g *Graph) ToDump() string {
-	return ""
+func (g *Graph) Dump(db *sql.DB) {
+
+	var i int = 0
+	var values []interface{}
+	var sql string = `INSERT INTO data (graph_id, ts, value, params, c1, c2, c3) VALUES`
+
+	for _, row := range g.rows {
+		sql += fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d), ", i+1, i+2, i+3, i+4, i+5, i+6, i+7)
+		values = append(values, row.GraphId, row.Ts, row.Value, row.ParamsAsJSON(), row.C1, row.C2, row.C3)
+		i += 7
+	}
+	fmt.Println(sql)
+
+	_, err := db.Query(sql[0:len(sql)-2], values...)
+
+	if err != nil {
+		panic(err)
+	}
 }
 
 type GraphList struct {
-	UpdatedAt time.Time
-	Graphs    []*Graph
-	dbConn    *sql.DB
+	UpdatedAt          time.Time
+	Graphs             []*Graph
+	dbConn             *sql.DB
+	isAutoReloaded     bool
+	autoSaveTickerQuit chan bool
+	autoSaveTicker     *time.Ticker
 }
 
 func (gl *GraphList) Db() *sql.DB {
@@ -55,6 +86,37 @@ func (gl *GraphList) Db() *sql.DB {
 	}
 
 	return gl.dbConn
+}
+
+func (gl *GraphList) StartAutoReload() {
+
+	if gl.isAutoReloaded == false {
+
+		gl.Reload()
+
+		autoSaveTicker := time.NewTicker(10 * time.Second)
+		autoSaveTickerQuit := make(chan bool)
+
+		gl.autoSaveTicker = autoSaveTicker
+		gl.autoSaveTickerQuit = autoSaveTickerQuit
+
+		go func() {
+			for {
+				select {
+				case <-gl.autoSaveTicker.C:
+					gl.Reload()
+				case <-gl.autoSaveTickerQuit:
+					gl.autoSaveTicker.Stop()
+					return
+				}
+			}
+		}()
+	}
+}
+
+func (gl *GraphList) StopAutoReload() {
+	gl.isAutoReloaded = false
+	gl.autoSaveTickerQuit <- true
 }
 
 func (gl *GraphList) Clear() {
@@ -101,7 +163,10 @@ func (gl *GraphList) Create(title string) *Graph {
 }
 
 func (gl *GraphList) Reload() {
+	gl.Save()
 	gl.Clear()
+
+	fmt.Println(`Reload`)
 
 	rows, err := gl.Db().Query(`SELECT graph_id, title, added_at, updated_at FROM graph`)
 
@@ -127,9 +192,11 @@ func (gl *GraphList) Reload() {
 }
 
 func (gl *GraphList) Save() {
+	fmt.Println("Save")
+
 	for _, graph := range gl.Graphs {
 		if graph.IsChanged == true {
-			gl.Db().Query(graph.ToDump())
+			graph.Dump(gl.Db())
 		}
 	}
 }

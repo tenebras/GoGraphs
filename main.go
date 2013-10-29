@@ -40,13 +40,13 @@ func RequestPush(w http.ResponseWriter, r *http.Request) {
 			dataRow.C3 = c3.(float64)
 		}
 
-		graph.AddRow(&dataRow)
+		if params, ok := pushData[`params`]; ok {
+			dataRow.Params = params.(map[string]interface{})
+		}
 
-		fmt.Fprintf(w, `%d`, 1)
-		return
+		graph.AddRow(&dataRow)
 	}
 
-	fmt.Fprintf(w, `%d`, 0)
 	return
 }
 
@@ -61,12 +61,12 @@ func RequestGet(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	fmt.Println(`GoGraph v0.1`)
-	graphs.Reload()
+	graphs.StartAutoReload()
 
 	http.HandleFunc(`/push`, RequestPush)
 	http.HandleFunc(`/get`, RequestGet)
 
-	fmt.Printf("Actions:\n - /get\n - /push\n\nRun on :8080")
+	fmt.Printf("Actions:\n - /get\n - /push\n\nRun on :8080\n")
 
 	http.ListenAndServe(`:8080`, nil)
 }
