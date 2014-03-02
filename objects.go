@@ -2,30 +2,39 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
+	/*"encoding/json"*/
 	"fmt"
 	_ "github.com/lib/pq"
 	"time"
 )
 
-const TTL_TO_UPDATE = 10
+const (
+	TTL_TO_UPDATE      = 30
+	SYNC_BEFORE_VALUUM = 5
+)
 
-type DataRow struct {
-	DataId     int
-	GraphId    int
-	Ts         time.Time
-	Value      float64
-	Params     map[string]interface{}
-	C1, C2, C3 float64
+type Meta struct {
+	Value     string
+	ObjectId  int64
+	Ts        time.Time
+	isDeleted bool
 }
 
-func (dr *DataRow) ParamsAsJSON() string {
-	if len(dr.Params) == 0 {
-		return `{}`
-	}
+type Comment struct {
+	Value     string
+	ObjectId  int64
+	Ts        time.Time
+	isDeleted bool
+}
 
-	result, _ := json.Marshal(dr.Params)
-	return string(result)
+type DataRow struct {
+	DataId    int
+	GraphId   int
+	Ts        time.Time
+	Value     float64
+	ObjectId  int64
+	Amount    int
+	isDeleted bool
 }
 
 type Graph struct {
@@ -35,33 +44,83 @@ type Graph struct {
 	UpdatedAt time.Time
 	rows      []*DataRow
 	IsChanged bool
+	Meta      []*Meta
+	Comments  []*Comment
+}
+
+func (g *Graph) AddMeta(text string, objectId int64) {
+	g.Meta = append(g.Meta, &Meta{Value: text, ObjectId: objectId, Ts: time.Now()})
+}
+
+func (g *Graph) AddComment(text string, objectId int64) {
+	g.Comments = append(g.Comments, &Comment{Value: text, ObjectId: objectId, Ts: time.Now()})
 }
 
 func (g *Graph) AddRow(row *DataRow) {
-	g.rows = append(g.rows, row)
-	g.IsChanged = true
+	row.GraphId = g.GraphId
+	var emptyIndex int = -1
 
-	fmt.Printf(`%+v`, row)
+	// Find deleted row and replace it with new value (to prevent memory allocation)
+	for idx, value := range g.rows {
+		if emptyIndex != -1 && value.isDeleted == true {
+			emptyIndex = idx
+		}
+
+		if value.ObjectId == row.ObjectId && value.Ts == row.Ts {
+			fmt.Println("Aggregate")
+			g.rows[idx].Amount += 1
+			g.rows[idx].Value += row.Value
+			g.IsChanged = true
+
+			return
+		}
+	}
+
+	if emptyIndex != -1 {
+		g.rows[emptyIndex] = row
+	} else {
+		// No empty records in slice, add new
+		g.rows = append(g.rows, row)
+	}
+	g.IsChanged = true
 }
 
-func (g *Graph) Dump(db *sql.DB) {
-
-	var i int = 0
-	var values []interface{}
-	var sql string = `INSERT INTO data (graph_id, ts, value, params, c1, c2, c3) VALUES`
-
+func (g *Graph) Vacuum() {
+	rows := make([]*DataRow, 0)
+	fmt.Printf("Execute vacuum, records before %d\n", len(g.rows))
 	for _, row := range g.rows {
-		sql += fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d), ", i+1, i+2, i+3, i+4, i+5, i+6, i+7)
-		values = append(values, row.GraphId, row.Ts, row.Value, row.ParamsAsJSON(), row.C1, row.C2, row.C3)
-		i += 7
+		if row.isDeleted == false {
+			rows = append(rows, row)
+		}
 	}
-	fmt.Println(sql)
 
-	_, err := db.Query(sql[0:len(sql)-2], values...)
+	g.rows = rows
 
-	if err != nil {
-		panic(err)
+	fmt.Printf("Records after: %d\n", len(g.rows))
+}
+
+func (g *Graph) Dump(stmt *sql.Stmt, execVacuum bool) error {
+
+	for idx, row := range g.rows {
+		if !row.isDeleted {
+			_, err := stmt.Exec(row.GraphId, row.Ts, row.Value, row.ObjectId)
+
+			if err != nil {
+				return err
+			} else {
+				row.isDeleted = true
+				fmt.Printf("Deleted: %+v\n", g.rows[idx])
+			}
+		}
 	}
+
+	g.IsChanged = false
+
+	if execVacuum {
+		g.Vacuum()
+	}
+
+	return nil
 }
 
 type GraphList struct {
@@ -71,11 +130,12 @@ type GraphList struct {
 	isAutoReloaded     bool
 	autoSaveTickerQuit chan bool
 	autoSaveTicker     *time.Ticker
+	syncCounter        int
 }
 
 func (gl *GraphList) Db() *sql.DB {
 	if gl.dbConn == nil {
-		dbConn, err := sql.Open("postgres", "user=postgres dbname=gographs password=123 port=5433")
+		dbConn, err := sql.Open("postgres", "user=postgres dbname=graphs password=123 port=5432")
 
 		if err != nil {
 			fmt.Println("Can't connect to database:")
@@ -88,11 +148,11 @@ func (gl *GraphList) Db() *sql.DB {
 	return gl.dbConn
 }
 
-func (gl *GraphList) StartAutoReload() {
+func (gl *GraphList) StartAutoSync() {
 
 	if gl.isAutoReloaded == false {
 
-		gl.Reload()
+		gl.Sync()
 
 		autoSaveTicker := time.NewTicker(10 * time.Second)
 		autoSaveTickerQuit := make(chan bool)
@@ -104,7 +164,7 @@ func (gl *GraphList) StartAutoReload() {
 			for {
 				select {
 				case <-gl.autoSaveTicker.C:
-					gl.Reload()
+					gl.Sync()
 				case <-gl.autoSaveTickerQuit:
 					gl.autoSaveTicker.Stop()
 					return
@@ -114,13 +174,9 @@ func (gl *GraphList) StartAutoReload() {
 	}
 }
 
-func (gl *GraphList) StopAutoReload() {
+func (gl *GraphList) StopAutoSync() {
 	gl.isAutoReloaded = false
 	gl.autoSaveTickerQuit <- true
-}
-
-func (gl *GraphList) Clear() {
-	gl.Graphs = make([]*Graph, 0)
 }
 
 func (gl *GraphList) Add(graph *Graph) {
@@ -139,6 +195,26 @@ func (gl *GraphList) FindByTitle(title string, autoCreate bool) *Graph {
 	}
 
 	return nil
+}
+
+func (gl *GraphList) FindIndexByTitle(title string) int {
+	for idx, value := range gl.Graphs {
+		if value.Title == title {
+			return idx
+		}
+	}
+
+	return -1
+}
+
+func (gl *GraphList) Replace(idx int, graph *Graph) {
+	gl.Graphs[idx] = graph
+}
+
+func (gl *GraphList) Merge(idx int, graph *Graph) {
+	gl.Graphs[idx].Title = graph.Title
+	gl.Graphs[idx].AddedAt = graph.AddedAt
+	gl.Graphs[idx].UpdatedAt = graph.UpdatedAt
 }
 
 func (gl *GraphList) Create(title string) *Graph {
@@ -162,11 +238,10 @@ func (gl *GraphList) Create(title string) *Graph {
 	return &g
 }
 
-func (gl *GraphList) Reload() {
+func (gl *GraphList) Sync() {
 	gl.Save()
-	gl.Clear()
 
-	fmt.Println(`Reload`)
+	fmt.Println(`Synchronize`)
 
 	rows, err := gl.Db().Query(`SELECT graph_id, title, added_at, updated_at FROM graph`)
 
@@ -181,7 +256,11 @@ func (gl *GraphList) Reload() {
 			panic(err)
 		}
 
-		gl.Add(&g)
+		if idx := gl.FindIndexByTitle(g.Title); idx == -1 {
+			gl.Add(&g)
+		} else {
+			gl.Merge(idx, &g)
+		}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -192,11 +271,38 @@ func (gl *GraphList) Reload() {
 }
 
 func (gl *GraphList) Save() {
-	fmt.Println("Save")
+	fmt.Printf("Save %d\n", gl.syncCounter)
+	vacuum := gl.syncCounter == SYNC_BEFORE_VALUUM
 
-	for _, graph := range gl.Graphs {
-		if graph.IsChanged == true {
-			graph.Dump(gl.Db())
+	if len(gl.Graphs) > 0 {
+
+		tx, err := gl.Db().Begin()
+		if err != nil {
+			panic(err)
 		}
+
+		stmt, err := gl.Db().Prepare("INSERT INTO data (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)")
+
+		if err != nil {
+			panic(err)
+		}
+
+		for _, graph := range gl.Graphs {
+			if graph.IsChanged == true {
+				if err := graph.Dump(stmt, vacuum); err != nil {
+					tx.Rollback()
+					stmt.Close()
+					panic(err)
+				}
+			}
+		}
+
+		tx.Commit()
+	}
+
+	if vacuum {
+		gl.syncCounter = 0
+	} else {
+		gl.syncCounter += 1
 	}
 }
