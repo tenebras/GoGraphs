@@ -20,6 +20,7 @@ CREATE TABLE data (
   ts timestamp without time zone,
   value double precision,
   object_id bigint,
+  amount bigint,
   CONSTRAINT data_pkey PRIMARY KEY (data_id)
 ) WITH (OIDS=FALSE);
 

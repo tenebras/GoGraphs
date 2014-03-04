@@ -88,13 +88,32 @@ type Graph struct {
 }
 
 func (g *Graph) AddMeta(text string, objectId int64) {
+
+	for idx, value := range g.Meta {
+		if value.isDeleted == true {
+			g.Meta[idx] = &Meta{Value: text, ObjectId: objectId, Ts: time.Now()}
+
+			return
+		}
+	}
+
+	// No empty record, add new one
 	g.Meta = append(g.Meta, &Meta{Value: text, ObjectId: objectId, Ts: time.Now()})
 }
 
 func (g *Graph) AddComment(text string, objectId int64) {
+	for idx, value := range g.Comments {
+		if value.isDeleted == true {
+			g.Comments[idx] = &Comment{Value: text, ObjectId: objectId, Ts: time.Now()}
+
+			return
+		}
+	}
+
 	g.Comments = append(g.Comments, &Comment{Value: text, ObjectId: objectId, Ts: time.Now()})
 }
 
+// Why store graphId in row?
 func (g *Graph) AddRow(row *DataRow) {
 	row.GraphId = g.GraphId
 	var emptyIndex int = -1
@@ -126,16 +145,33 @@ func (g *Graph) AddRow(row *DataRow) {
 
 func (g *Graph) Vacuum() {
 	rows := make([]*DataRow, 0)
-	fmt.Printf("Execute vacuum, records before %d\n", len(g.rows))
+	meta := make([]*Meta, 0)
+	comments := make([]*Comment, 0)
+
+	fmt.Printf("Vacuum: records before %d\n", len(g.rows)+len(g.Meta)+len(g.Comments))
 	for _, row := range g.rows {
 		if row.isDeleted == false {
 			rows = append(rows, row)
 		}
 	}
 
-	g.rows = rows
+	for _, row := range g.Meta {
+		if row.isDeleted == false {
+			meta = append(meta, row)
+		}
+	}
 
-	fmt.Printf("Records after: %d\n", len(g.rows))
+	for _, row := range g.Comments {
+		if row.isDeleted == false {
+			comments = append(comments, row)
+		}
+	}
+
+	g.rows = rows
+	g.Meta = meta
+	g.Comments = comments
+
+	fmt.Printf("Vacuum: records after %d\n", len(g.rows)+len(g.Meta)+len(g.Comments))
 }
 
 func (g *Graph) Store(bundle *DataInsertBundle, execVacuum bool) error {
@@ -168,6 +204,7 @@ func (g *Graph) Store(bundle *DataInsertBundle, execVacuum bool) error {
 	return nil
 }
 
+// @todo Merge with already stored rows?
 func (g *Graph) storeData(stmt *sql.Stmt) error {
 	for _, row := range g.rows {
 		if !row.isDeleted {
@@ -393,6 +430,7 @@ func (gl *GraphList) Save() {
 			}
 		}
 
+		insertBundle.Close()
 		tx.Commit()
 	}
 
