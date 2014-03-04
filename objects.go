@@ -11,7 +11,46 @@ import (
 const (
 	TTL_TO_UPDATE      = 30
 	SYNC_BEFORE_VALUUM = 5
+	DSN                = `user=postgres dbname=graphs password=123 port=5432 sslmode=disable`
+	DB_DRIVER          = `postgres`
 )
+
+type DataInsertBundle struct {
+	Data    *sql.Stmt
+	Meta    *sql.Stmt
+	Comment *sql.Stmt
+	Graph   *sql.Stmt
+}
+
+func (dib *DataInsertBundle) Close() {
+	dib.Meta.Close()
+	dib.Data.Close()
+	dib.Comment.Close()
+}
+
+func (dib *DataInsertBundle) PrepareAll(db *sql.DB) error {
+	comment, errComment := db.Prepare(`INSERT INTO comment (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
+	data, errData := db.Prepare(`INSERT INTO data (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
+	meta, errMeta := db.Prepare(`INSERT INTO meta (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
+	graph, errGraph := db.Prepare(`UPDATE graph SET updated_at = $1 WHERE graph_id = $2`)
+
+	dib.Comment = comment
+	dib.Meta = meta
+	dib.Data = data
+	dib.Graph = graph
+
+	if errData != nil {
+		panic(errData)
+	} else if errMeta != nil {
+		panic(errMeta)
+	} else if errComment != nil {
+		panic(errComment)
+	} else if errGraph != nil {
+		panic(errGraph)
+	}
+
+	return nil
+}
 
 type Meta struct {
 	Value     string
@@ -99,7 +138,37 @@ func (g *Graph) Vacuum() {
 	fmt.Printf("Records after: %d\n", len(g.rows))
 }
 
-func (g *Graph) StoreData(stmt *sql.Stmt, execVacuum bool) error {
+func (g *Graph) Store(bundle *DataInsertBundle, execVacuum bool) error {
+
+	if err := g.storeData(bundle.Data); err != nil {
+		if err := g.storeMeta(bundle.Meta); err != nil {
+			if err := g.storeComments(bundle.Comment); err != nil {
+				g.IsChanged = false
+				g.UpdatedAt = time.Now()
+
+				_, err := bundle.Graph.Exec(g.GraphId, g.UpdatedAt.Format(`2006-01-02 15:04:05`))
+
+				if err != nil {
+					return err
+				}
+
+				if execVacuum {
+					g.Vacuum()
+				}
+			} else {
+				return err
+			}
+		} else {
+			return err
+		}
+	} else {
+		return err
+	}
+
+	return nil
+}
+
+func (g *Graph) storeData(stmt *sql.Stmt) error {
 	for _, row := range g.rows {
 		if !row.isDeleted {
 			_, err := stmt.Exec(row.GraphId, row.Ts, row.Value, row.ObjectId, row.Amount)
@@ -112,16 +181,10 @@ func (g *Graph) StoreData(stmt *sql.Stmt, execVacuum bool) error {
 		}
 	}
 
-	g.IsChanged = false
-
-	if execVacuum {
-		g.Vacuum()
-	}
-
 	return nil
 }
 
-func (g *Graph) StoreMeta(stmt *sql.Stmt) error {
+func (g *Graph) storeMeta(stmt *sql.Stmt) error {
 	for _, row := range g.Meta {
 		if !row.isDeleted {
 			_, err := stmt.Exec(g.GraphId, row.Ts, row.Value, row.ObjectId)
@@ -134,12 +197,10 @@ func (g *Graph) StoreMeta(stmt *sql.Stmt) error {
 		}
 	}
 
-	g.IsChanged = false
-
 	return nil
 }
 
-func (g *Graph) StoreComments(stmt *sql.Stmt) error {
+func (g *Graph) storeComments(stmt *sql.Stmt) error {
 	for _, row := range g.Comments {
 		if !row.isDeleted {
 			_, err := stmt.Exec(g.GraphId, row.Ts, row.Value, row.ObjectId)
@@ -151,8 +212,6 @@ func (g *Graph) StoreComments(stmt *sql.Stmt) error {
 			}
 		}
 	}
-
-	g.IsChanged = false
 
 	return nil
 }
@@ -169,10 +228,10 @@ type GraphList struct {
 
 func (gl *GraphList) Db() *sql.DB {
 	if gl.dbConn == nil {
-		dbConn, err := sql.Open("postgres", "user=tenebras dbname=graphs password=JustDoIt_18 port=5432")
+		dbConn, err := sql.Open(DB_DRIVER, DSN)
 
 		if err != nil {
-			fmt.Println("Can't connect to database:")
+			fmt.Println(`Can't connect to database:`)
 			panic(err)
 		}
 
@@ -251,6 +310,7 @@ func (gl *GraphList) Merge(idx int, graph *Graph) {
 	gl.Graphs[idx].UpdatedAt = graph.UpdatedAt
 }
 
+// @todo Find in db before create
 func (gl *GraphList) Create(title string) *Graph {
 	g := Graph{Title: title, AddedAt: time.Now(), UpdatedAt: time.Now(), IsChanged: true}
 
@@ -272,9 +332,9 @@ func (gl *GraphList) Create(title string) *Graph {
 	return &g
 }
 
+// @todo remove graphs not in list
 func (gl *GraphList) Sync() {
 	gl.Save()
-
 	fmt.Println(`Synchronize`)
 
 	rows, err := gl.Db().Query(`SELECT graph_id, title, added_at, updated_at FROM graph`)
@@ -306,7 +366,7 @@ func (gl *GraphList) Sync() {
 
 func (gl *GraphList) Save() {
 	fmt.Printf("Save %d\n", gl.syncCounter)
-	vacuum := gl.syncCounter == SYNC_BEFORE_VALUUM
+	execVacuum := gl.syncCounter == SYNC_BEFORE_VALUUM
 
 	if len(gl.Graphs) > 0 {
 
@@ -315,38 +375,20 @@ func (gl *GraphList) Save() {
 			panic(err)
 		}
 
-		insertDataStmt, errData := gl.Db().Prepare("INSERT INTO data (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)")
-		insertMetaStmt, errMeta := gl.Db().Prepare("INSERT INTO meta (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)")
-		insertCommentStmt, errComment := gl.Db().Prepare(`INSERT INTO comment (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
+		var insertBundle *DataInsertBundle = &DataInsertBundle{}
 
-		if errData != nil {
-			panic(errData)
-		} else if errMeta != nil {
-			panic(errMeta)
-		} else if errComment != nil {
-			panic(errComment)
+		if err := insertBundle.PrepareAll(gl.Db()); err != nil {
+			panic(err)
 		}
 
 		for _, graph := range gl.Graphs {
 			if graph.IsChanged == true {
 
-				errMeta := graph.StoreMeta(insertMetaStmt)
-				errComment := graph.StoreComments(insertCommentStmt)
-				errData := graph.StoreData(insertDataStmt, vacuum)
-
-				if errMeta != nil || errComment != nil || errData != nil {
+				if err := graph.Store(insertBundle, execVacuum); err != nil {
 					tx.Rollback()
-					insertDataStmt.Close()
-					insertCommentStmt.Close()
-					insertMetaStmt.Close()
+					insertBundle.Close()
 
-					if errData != nil {
-						panic(errData)
-					} else if errMeta != nil {
-						panic(errMeta)
-					} else if errComment != nil {
-						panic(errComment)
-					}
+					panic(err)
 				}
 			}
 		}
@@ -354,7 +396,7 @@ func (gl *GraphList) Save() {
 		tx.Commit()
 	}
 
-	if vacuum {
+	if execVacuum {
 		gl.syncCounter = 0
 	} else {
 		gl.syncCounter += 1
