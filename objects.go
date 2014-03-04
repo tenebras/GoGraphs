@@ -169,7 +169,7 @@ type GraphList struct {
 
 func (gl *GraphList) Db() *sql.DB {
 	if gl.dbConn == nil {
-		dbConn, err := sql.Open("postgres", "user=postgres dbname=graphs password=123 port=5432")
+		dbConn, err := sql.Open("postgres", "user=tenebras dbname=graphs password=JustDoIt_18 port=5432")
 
 		if err != nil {
 			fmt.Println("Can't connect to database:")
