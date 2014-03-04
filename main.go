@@ -51,8 +51,8 @@ func HandlePush(w http.ResponseWriter, r *http.Request) {
 			graph.AddComment(comment, objectId)
 		}
 
-		fmt.Println(`Add row:`)
-		fmt.Printf("%+v\n", dataRow)
+		fmt.Println(`Add row`)
+		//fmt.Printf("%+v\n", dataRow)
 	} else {
 		fmt.Println(`Ignore record with empty title`)
 		fmt.Printf("%+v\n", r)
