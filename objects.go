@@ -99,17 +99,15 @@ func (g *Graph) Vacuum() {
 	fmt.Printf("Records after: %d\n", len(g.rows))
 }
 
-func (g *Graph) Dump(stmt *sql.Stmt, execVacuum bool) error {
-
-	for idx, row := range g.rows {
+func (g *Graph) StoreData(stmt *sql.Stmt, execVacuum bool) error {
+	for _, row := range g.rows {
 		if !row.isDeleted {
-			_, err := stmt.Exec(row.GraphId, row.Ts, row.Value, row.ObjectId)
+			_, err := stmt.Exec(row.GraphId, row.Ts, row.Value, row.ObjectId, row.Amount)
 
 			if err != nil {
 				return err
 			} else {
 				row.isDeleted = true
-				fmt.Printf("Deleted: %+v\n", g.rows[idx])
 			}
 		}
 	}
@@ -119,6 +117,42 @@ func (g *Graph) Dump(stmt *sql.Stmt, execVacuum bool) error {
 	if execVacuum {
 		g.Vacuum()
 	}
+
+	return nil
+}
+
+func (g *Graph) StoreMeta(stmt *sql.Stmt) error {
+	for _, row := range g.Meta {
+		if !row.isDeleted {
+			_, err := stmt.Exec(g.GraphId, row.Ts, row.Value, row.ObjectId)
+
+			if err != nil {
+				return err
+			} else {
+				row.isDeleted = true
+			}
+		}
+	}
+
+	g.IsChanged = false
+
+	return nil
+}
+
+func (g *Graph) StoreComments(stmt *sql.Stmt) error {
+	for _, row := range g.Comments {
+		if !row.isDeleted {
+			_, err := stmt.Exec(g.GraphId, row.Ts, row.Value, row.ObjectId)
+
+			if err != nil {
+				return err
+			} else {
+				row.isDeleted = true
+			}
+		}
+	}
+
+	g.IsChanged = false
 
 	return nil
 }
@@ -135,7 +169,7 @@ type GraphList struct {
 
 func (gl *GraphList) Db() *sql.DB {
 	if gl.dbConn == nil {
-		dbConn, err := sql.Open("postgres", "user=postgres dbname=graphs password=123 port=5432")
+		dbConn, err := sql.Open("postgres", "user=tenebras dbname=graphs password=JustDoIt_18 port=5432")
 
 		if err != nil {
 			fmt.Println("Can't connect to database:")
@@ -281,18 +315,38 @@ func (gl *GraphList) Save() {
 			panic(err)
 		}
 
-		stmt, err := gl.Db().Prepare("INSERT INTO data (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)")
+		insertDataStmt, errData := gl.Db().Prepare("INSERT INTO data (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)")
+		insertMetaStmt, errMeta := gl.Db().Prepare("INSERT INTO meta (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)")
+		insertCommentStmt, errComment := gl.Db().Prepare(`INSERT INTO comment (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
 
-		if err != nil {
-			panic(err)
+		if errData != nil {
+			panic(errData)
+		} else if errMeta != nil {
+			panic(errMeta)
+		} else if errComment != nil {
+			panic(errComment)
 		}
 
 		for _, graph := range gl.Graphs {
 			if graph.IsChanged == true {
-				if err := graph.Dump(stmt, vacuum); err != nil {
+
+				errMeta := graph.StoreMeta(insertMetaStmt)
+				errComment := graph.StoreComments(insertCommentStmt)
+				errData := graph.StoreData(insertDataStmt, vacuum)
+
+				if errMeta != nil || errComment != nil || errData != nil {
 					tx.Rollback()
-					stmt.Close()
-					panic(err)
+					insertDataStmt.Close()
+					insertCommentStmt.Close()
+					insertMetaStmt.Close()
+
+					if errData != nil {
+						panic(errData)
+					} else if errMeta != nil {
+						panic(errMeta)
+					} else if errComment != nil {
+						panic(errComment)
+					}
 				}
 			}
 		}
