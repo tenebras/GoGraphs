@@ -10,9 +10,8 @@ import (
 )
 
 var (
-	PORT   int = 8080
-	graphs     = new(GraphList)
-	app        = new(App)
+	PORT int = 8080
+	app      = new(App)
 )
 
 func main() {
@@ -24,10 +23,6 @@ func main() {
 	fmt.Println("Actions:\n - /get?tile=<graph title>&from=<Y.m.d H:i:s>&to=<optional Y.m.d H:i:s>\n - /push?title=<graph title>&object_id=<optional object id>&value=<value>&comment=<text comment>&meta=<json string with additional params>\n - /info?title=<graph title>\n\nRun on :8080")
 
 	app.Init()
-	//col := Collection{Title: "test", AddedAt: time.Now(), UpdatedAt: time.Now()}
-	//col.Fields = append(col.Fields, &CollectionField{Name: "email", Type: "string", Size: 256})
-
-	//graphs.StartAutoSync()
 
 	http.HandleFunc(`/push`, HandlePush)
 	http.HandleFunc(`/get`, HandleGet)
