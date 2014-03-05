@@ -56,7 +56,7 @@ CREATE TABLE collection(
 	collection_id BIGSERIAL NOT NULL,
 	title varchar(255),
 	added_at timestamp without time zone,
-	updates_at timestamp without time zone,
+	updated_at timestamp without time zone,
 	structure text,
 	CONSTRAINT collection_pkey PRIMARY KEY (collection_id)
 );
