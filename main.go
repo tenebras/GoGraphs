@@ -19,8 +19,7 @@ func main() {
 	flag.IntVar(&PORT, "p", PORT, "server port")
 	flag.Parse()
 
-	fmt.Println(`GoGraph v0.1`)
-	fmt.Println("Actions:\n - /get?tile=<graph title>&from=<Y.m.d H:i:s>&to=<optional Y.m.d H:i:s>\n - /push?title=<graph title>&object_id=<optional object id>&value=<value>&comment=<text comment>&meta=<json string with additional params>\n - /info?title=<graph title>\n\nRun on :8080")
+	PrintHelp()
 
 	app.Init()
 
@@ -38,7 +37,20 @@ func main() {
 	http.ListenAndServe(`:`+strconv.Itoa(PORT), nil)
 }
 
-func HandleMetaAdd(w http.ResponseWriter, r *http.Request) {}
+func PrintHelp() {
+	fmt.Println(`GoGraph v0.1`)
+	fmt.Println("Actions:\n" +
+		" - /get?tile=<graph title>&from=<Y.m.d H:i:s>&to=<optional Y.m.d H:i:s>\n" +
+		" - /push?title=<graph title>&object_id=<optional object id>&value=<value>&comment=<text comment>&meta=<json string with additional params>\n" +
+		" - /info?title=<graph title>\n" +
+		" - /collection/list\n" +
+		"\n\nRun on :8080")
+}
+
+func HandleMetaAdd(w http.ResponseWriter, r *http.Request) {
+
+}
+
 func HandleMetaGet(w http.ResponseWriter, r *http.Request) {}
 
 func HandleCommentAdd(w http.ResponseWriter, r *http.Request) {}
@@ -85,7 +97,7 @@ func HandlePush(w http.ResponseWriter, r *http.Request) {
 			graph.AddComment(comment, objectId)
 		}
 
-		fmt.Println(`Add row`)
+		//fmt.Println(`Add row`)
 	} else {
 		fmt.Println(`Ignore record with empty title`)
 		fmt.Printf("%+v\n", r)

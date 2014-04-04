@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	_ "github.com/lib/pq"
+	"runtime"
 	"strconv"
 	"time"
 )
 
 const (
-	TTL_TO_UPDATE      = 30
+	TTL_TO_UPDATE      = 60
 	SYNC_BEFORE_VACUUM = 5
 	DSN                = `user=postgres dbname=graphs password=123 port=5432 sslmode=disable`
 	DB_DRIVER          = `postgres`
@@ -31,8 +32,8 @@ func (dib *DataInsertBundle) Close() {
 }
 
 func (dib *DataInsertBundle) PrepareAll(db *sql.DB) error {
-	comment, errComment := db.Prepare(`INSERT INTO comment (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
-	data, errData := db.Prepare(`INSERT INTO data (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
+	comment, errComment := db.Prepare(`INSERT INTO comment (graph_id, ts, msg, object_id) VALUES($1, $2, $3, $4)`)
+	data, errData := db.Prepare(`INSERT INTO data (graph_id, ts, value, object_id, amount) VALUES($1, $2, $3, $4, $5)`)
 	meta, errMeta := db.Prepare(`INSERT INTO meta (graph_id, ts, value, object_id) VALUES($1, $2, $3, $4)`)
 	graph, errGraph := db.Prepare(`UPDATE graph SET updated_at = $1 WHERE graph_id = $2`)
 
@@ -124,7 +125,7 @@ func (g *Graph) AddRow(row *DataRow) {
 		}
 
 		if value.ObjectId == row.ObjectId && value.Ts == row.Ts {
-			fmt.Println(`Aggregate`)
+			//fmt.Println(`Aggregate`)
 			g.rows[idx].Amount += 1
 			g.rows[idx].Value += row.Value
 			g.IsChanged = true
@@ -143,6 +144,12 @@ func (g *Graph) AddRow(row *DataRow) {
 }
 
 func (g *Graph) Vacuum() {
+
+	m := runtime.MemStats{}
+
+	runtime.ReadMemStats(&m)
+	fmt.Printf("Used memory: %v\n", m.Alloc)
+
 	rows := make([]*DataRow, 0)
 	meta := make([]*Meta, 0)
 	comments := make([]*Comment, 0)
@@ -166,22 +173,29 @@ func (g *Graph) Vacuum() {
 		}
 	}
 
+	g.rows = nil
+	g.Meta = nil
+	g.Comments = nil
+
+	runtime.GC()
+
 	g.rows = rows
 	g.Meta = meta
 	g.Comments = comments
 
 	fmt.Printf("Vacuum: records after %d\n", len(g.rows)+len(g.Meta)+len(g.Comments))
+	runtime.ReadMemStats(&m)
+	fmt.Printf("Used memory:  %v\n", m.Alloc)
 }
 
 func (g *Graph) Store(bundle *DataInsertBundle, execVacuum bool) error {
-
-	if err := g.storeData(bundle.Data); err != nil {
-		if err := g.storeMeta(bundle.Meta); err != nil {
-			if err := g.storeComments(bundle.Comment); err != nil {
+	if err := g.storeData(bundle.Data); err == nil {
+		if err := g.storeMeta(bundle.Meta); err == nil {
+			if err := g.storeComments(bundle.Comment); err == nil {
 				g.IsChanged = false
 				g.UpdatedAt = time.Now()
 
-				_, err := bundle.Graph.Exec(g.GraphId, g.UpdatedAt.Format(DATE_FORMAT))
+				_, err := bundle.Graph.Exec(g.UpdatedAt.Format(DATE_FORMAT), g.GraphId)
 
 				if err != nil {
 					return err
@@ -190,6 +204,7 @@ func (g *Graph) Store(bundle *DataInsertBundle, execVacuum bool) error {
 				if execVacuum {
 					g.Vacuum()
 				}
+
 			} else {
 				return err
 			}
@@ -317,9 +332,8 @@ func (gl *GraphList) Create(title string) *Graph {
 }
 
 // @todo remove graphs not in list
-func (gl *GraphList) Sync(db *sql.DB) {
-	gl.Save(db)
-	fmt.Println(`Synchronize`)
+func (gl *GraphList) Sync(db *sql.DB, isVacuumTime bool) {
+	gl.Save(db, isVacuumTime)
 
 	rows, err := db.Query(`SELECT graph_id, title, added_at, updated_at FROM graph`)
 
@@ -346,7 +360,7 @@ func (gl *GraphList) Sync(db *sql.DB) {
 	}
 }
 
-func (gl *GraphList) Save(db *sql.DB) {
+func (gl *GraphList) Save(db *sql.DB, isVacuumTime bool) {
 	if len(gl.Graphs) > 0 {
 
 		tx, err := db.Begin()
@@ -363,7 +377,7 @@ func (gl *GraphList) Save(db *sql.DB) {
 		for _, graph := range gl.Graphs {
 			if graph.IsChanged == true {
 
-				if err := graph.Store(insertBundle, app.IsVacuumTime); err != nil {
+				if err := graph.Store(insertBundle, isVacuumTime); err != nil {
 					tx.Rollback()
 					insertBundle.Close()
 
@@ -396,9 +410,11 @@ func (app *App) Init() {
 }
 
 func (app *App) Sync() {
-	app.IsVacuumTime = app.syncCounter == SYNC_BEFORE_VACUUM
+	app.IsVacuumTime = app.syncCounter >= SYNC_BEFORE_VACUUM
 
-	app.Graphs.Sync(app.Db())
+	fmt.Printf("Synchronize %d\n", app.syncCounter)
+
+	app.Graphs.Sync(app.Db(), app.IsVacuumTime)
 	app.Collections.Sync(app.Db())
 
 	if app.IsVacuumTime {
